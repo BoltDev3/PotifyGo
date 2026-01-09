@@ -1,0 +1,16 @@
+# Wails build binaries
+build/bin/
+frontend/dist/
+
+# Dependencies
+vendor/
+node_modules/
+
+# OS stuff
+.DS_Store
+Thumbs.db
+
+# Private Config (WICHTIG!)
+config.json
+*.exe
+binaries/
