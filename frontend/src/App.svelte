@@ -318,7 +318,7 @@
     <div class="credits">
       BUILD_BY_BOLDDEV3
       <a
-        href="https://github.com/bolddev3/PotifyGo"
+        href="https://github.com/BoltDev3/PotifyGo"
         target="_blank"
         class="repo-link">GET_REPO</a
       >
