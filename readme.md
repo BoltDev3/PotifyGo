@@ -4,7 +4,7 @@
 
 ---
 ## NOTE:
-### The V2.0 should come out anytime. I am actively worrikng on it. Thanks.
+### The V2.0 should come out anytime. I am actively working on it. Thanks.
 ---
 
 ## 🔥 Features
