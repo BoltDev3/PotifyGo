@@ -3,6 +3,9 @@
 **Spotify downloads as simple as they should be.** Tired of messy CLI tools? PotifyGo combines the raw power of `yt-dlp` and `ffmpeg` with a sleek, modern Svelte interface. Just paste your link, hit the button, and let the magic happen.
 
 ---
+## NOTE:
+### The V2.0 should come out anytime. I am actively worrikng on it. Thanks.
+---
 
 ## 🔥 Features
 
