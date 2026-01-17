@@ -12,7 +12,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
@@ -43,31 +42,49 @@ func NewApp() *App {
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
-	userConfigDir, _ := os.UserConfigDir()
+	userConfigDir, err := os.UserConfigDir()
+	if err != nil {
+		fmt.Printf("ERROR: Could not get user config dir: %v\n", err)
+		return
+	}
 	a.appDir = filepath.Join(userConfigDir, "PotifyGo")
-	_ = os.MkdirAll(a.appDir, 0755)
+	if err := os.MkdirAll(a.appDir, 0755); err != nil {
+		fmt.Printf("ERROR: Could not create app directory: %v\n", err)
+	}
 
 	a.ytdlpPath = filepath.Join(a.appDir, "yt-dlp.exe")
 	a.ffmpegPath = filepath.Join(a.appDir, "ffmpeg.exe")
 
 	tools := []string{"yt-dlp.exe", "ffmpeg.exe"}
 
-	// Wo liegt die PotifyGo.exe?
-	exePath, _ := os.Executable()
+	// Get the path of the executable
+	exePath, err := os.Executable()
+	if err != nil {
+		fmt.Printf("ERROR: Could not get executable path: %v\n", err)
+		return
+	}
 	baseDir := filepath.Dir(exePath)
 
-	// WICHTIG: Er schaut jetzt in den Unterordner "binaries"
+	// Check in the "binaries" subfolder
 	sourceDir := filepath.Join(baseDir, "binaries")
 
 	for _, tool := range tools {
 		target := filepath.Join(a.appDir, tool)
 		source := filepath.Join(sourceDir, tool)
 
-		// Nur kopieren, wenn es in AppData noch nicht existiert
+		// Only copy if it doesn't exist in AppData yet
 		if _, err := os.Stat(target); os.IsNotExist(err) {
 			if _, err := os.Stat(source); err == nil {
-				input, _ := os.ReadFile(source)
-				_ = os.WriteFile(target, input, 0755)
+				input, err := os.ReadFile(source)
+				if err != nil {
+					fmt.Printf("ERROR: Could not read %s: %v\n", source, err)
+					continue
+				}
+				err = os.WriteFile(target, input, 0755)
+				if err != nil {
+					fmt.Printf("ERROR: Could not write %s: %v\n", target, err)
+					continue
+				}
 				fmt.Printf("MIGRATION: %s moved to AppData\n", tool)
 			} else {
 				fmt.Printf("ERROR: %s not found in %s\n", tool, sourceDir)
@@ -76,12 +93,15 @@ func (a *App) startup(ctx context.Context) {
 	}
 	confPath := filepath.Join(a.appDir, "config.json")
 	if _, err := os.Stat(confPath); err == nil {
-		data, _ := os.ReadFile(confPath)
-		_ = json.Unmarshal(data, a.config)
-		// Das hier sieht man nur in der Konsole, schick es lieber auch ans UI:
-		fmt.Println("Config successfully loaded.")
+		data, err := os.ReadFile(confPath)
+		if err == nil {
+			if err := json.Unmarshal(data, a.config); err != nil {
+				fmt.Printf("ERROR: Could not unmarshal config: %v\n", err)
+			} else {
+				fmt.Println("Config successfully loaded.")
+			}
+		}
 	}
-	// Dein restlicher Config-Load Code...
 }
 
 func (a *App) logToUI(msg string) {
@@ -93,7 +113,7 @@ func (a *App) logToUI(msg string) {
 func (a *App) InitBranding() {
 	banner := []string{
 		"***************************************************",
-		"* PotifyGo v1.1O - Created by bolddev3            *",
+		"* PotifyGo v1.1 - Created by BoltDev3             *",
 		"***************************************************",
 		"SYSTEM: Ready. Config loaded: " + strconv.FormatBool(a.config.DownloadPath != ""),
 	}
@@ -115,8 +135,16 @@ func (a *App) SaveConfig(cid, secret, path string) {
 }
 
 func (a *App) internalPersist() {
-	data, _ := json.MarshalIndent(a.config, "", "  ")
-	_ = os.WriteFile(filepath.Join(a.appDir, "config.json"), data, 0644)
+	data, err := json.MarshalIndent(a.config, "", "  ")
+	if err != nil {
+		a.logToUI("ERROR: Could not marshal config: " + err.Error())
+		return
+	}
+	err = os.WriteFile(filepath.Join(a.appDir, "config.json"), data, 0644)
+	if err != nil {
+		a.logToUI("ERROR: Could not save config: " + err.Error())
+		return
+	}
 	a.logToUI("SYSTEM: Configuration saved.")
 }
 
@@ -159,11 +187,20 @@ func (a *App) Login() string {
 	c := make(chan *spotify.Client)
 	srv := &http.Server{Addr: "127.0.0.1:8888", Handler: mux}
 	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
-		tok, _ := auth.Token(r.Context(), state, r)
+		tok, err := auth.Token(r.Context(), state, r)
+		if err != nil {
+			http.Error(w, "Couldn't get token", http.StatusForbidden)
+			fmt.Printf("ERROR: Couldn't get token: %v\n", err)
+			return
+		}
 		c <- spotify.New(auth.Client(r.Context(), tok))
-		fmt.Fprint(w, "Authorized!")
+		fmt.Fprint(w, "Authorized! You can close this window.")
 	})
-	go srv.ListenAndServe()
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			fmt.Printf("ERROR: ListenAndServe: %v\n", err)
+		}
+	}()
 	time.Sleep(200 * time.Millisecond)
 	runtime.BrowserOpenURL(a.ctx, auth.AuthURL(state))
 	a.client = <-c
@@ -175,10 +212,24 @@ func (a *App) GetPlaylists() []map[string]string {
 	if a.client == nil {
 		return nil
 	}
-	p, _ := a.client.CurrentUsersPlaylists(a.ctx)
 	var res []map[string]string
-	for _, l := range p.Playlists {
-		res = append(res, map[string]string{"name": l.Name, "id": string(l.ID)})
+	offset := 0
+	for {
+		p, err := a.client.CurrentUsersPlaylists(a.ctx, spotify.Limit(50), spotify.Offset(offset))
+		if err != nil {
+			a.logToUI("ERROR: Could not fetch playlists: " + err.Error())
+			break
+		}
+		if len(p.Playlists) == 0 {
+			break
+		}
+		for _, l := range p.Playlists {
+			res = append(res, map[string]string{"name": l.Name, "id": string(l.ID)})
+		}
+		if len(res) >= int(p.Total) {
+			break
+		}
+		offset += 50
 	}
 	return res
 }
@@ -191,23 +242,39 @@ func (a *App) GetTracks(id string) []string {
 	offset := 0
 	for {
 		if id == "liked" {
-			res, _ := a.client.CurrentUsersTracks(a.ctx, spotify.Limit(50), spotify.Offset(offset))
-			if res == nil || len(res.Tracks) == 0 {
+			res, err := a.client.CurrentUsersTracks(a.ctx, spotify.Limit(50), spotify.Offset(offset))
+			if err != nil {
+				a.logToUI("ERROR: Could not fetch liked tracks: " + err.Error())
+				break
+			}
+			if len(res.Tracks) == 0 {
 				break
 			}
 			for _, v := range res.Tracks {
-				tracks = append(tracks, v.Artists[0].Name+" - "+v.Name)
+				if len(v.Artists) > 0 {
+					tracks = append(tracks, v.Artists[0].Name+" - "+v.Name)
+				} else {
+					tracks = append(tracks, "Unknown Artist - "+v.Name)
+				}
 			}
 			if len(tracks) >= int(res.Total) {
 				break
 			}
 		} else {
-			res, _ := a.client.GetPlaylistTracks(a.ctx, spotify.ID(id), spotify.Limit(50), spotify.Offset(offset))
-			if res == nil || len(res.Tracks) == 0 {
+			res, err := a.client.GetPlaylistTracks(a.ctx, spotify.ID(id), spotify.Limit(50), spotify.Offset(offset))
+			if err != nil {
+				a.logToUI("ERROR: Could not fetch playlist tracks: " + err.Error())
+				break
+			}
+			if len(res.Tracks) == 0 {
 				break
 			}
 			for _, v := range res.Tracks {
-				tracks = append(tracks, v.Track.Artists[0].Name+" - "+v.Track.Name)
+				if len(v.Track.Artists) > 0 {
+					tracks = append(tracks, v.Track.Artists[0].Name+" - "+v.Track.Name)
+				} else {
+					tracks = append(tracks, "Unknown Artist - "+v.Track.Name)
+				}
 			}
 			if len(tracks) >= int(res.Total) {
 				break
@@ -232,8 +299,11 @@ func (a *App) DeleteTrack(song string, playlistName string) string {
 	}
 
 	found := false
-	_ = filepath.Walk(a.config.DownloadPath, func(path string, info os.FileInfo, err error) error {
-		if err == nil && !info.IsDir() && strings.HasSuffix(strings.ToLower(info.Name()), ".mp3") {
+	err := filepath.Walk(a.config.DownloadPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // Continue walking
+		}
+		if !info.IsDir() && strings.HasSuffix(strings.ToLower(info.Name()), ".mp3") {
 			diskName := strings.ToLower(info.Name())
 			matches := 0
 			for _, word := range words {
@@ -253,12 +323,18 @@ func (a *App) DeleteTrack(song string, playlistName string) string {
 					if err == nil {
 						found = true
 						a.logToUI("DELETE_SUCCESS: " + info.Name())
+					} else {
+						a.logToUI("DELETE_ERROR: Could not remove file: " + err.Error())
 					}
 				}
 			}
 		}
 		return nil
 	})
+
+	if err != nil {
+		a.logToUI("ERROR: Error walking download path: " + err.Error())
+	}
 
 	if found {
 		return "SUCCESS"
@@ -285,20 +361,25 @@ func (a *App) Download(songName string, playlistName string) string {
 		"--audio-format", "mp3",
 		"--ignore-errors",
 		"--no-playlist",
-		"--ffmpeg-location", filepath.Join(a.appDir, "ffmpeg.exe"),
+		"--ffmpeg-location", a.ffmpegPath,
 		"--output", outputTemplate,
 		"ytsearch1:"+songName)
 
-	// --- HIER IST DER FIX FÜR DAS SCHWARZE FENSTER ---
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		HideWindow:    true,
-		CreationFlags: 0x08000000, // CREATE_NO_WINDOW
-	}
+	// --- FIX FOR BLACK WINDOW ON WINDOWS ---
+	setSysProcAttr(cmd)
 	// ------------------------------------------------
 
-	stdout, _ := cmd.StdoutPipe()
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		a.logToUI("ERROR: Could not get stdout pipe: " + err.Error())
+		return "ERROR"
+	}
 	cmd.Stderr = cmd.Stdout
-	_ = cmd.Start()
+
+	if err := cmd.Start(); err != nil {
+		a.logToUI("ERROR: Could not start download: " + err.Error())
+		return "ERROR"
+	}
 	a.currentCmd = cmd
 
 	scanner := bufio.NewScanner(stdout)
@@ -307,11 +388,13 @@ func (a *App) Download(songName string, playlistName string) string {
 		line := scanner.Text()
 		m := re.FindStringSubmatch(line)
 		if len(m) > 1 {
-			p, _ := strconv.ParseFloat(m[1], 64)
-			runtime.EventsEmit(a.ctx, "download_progress", map[string]interface{}{
-				"song":    songName,
-				"percent": int(p),
-			})
+			p, err := strconv.ParseFloat(m[1], 64)
+			if err == nil {
+				runtime.EventsEmit(a.ctx, "download_progress", map[string]interface{}{
+					"song":    songName,
+					"percent": int(p),
+				})
+			}
 		}
 	}
 

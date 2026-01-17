@@ -22,7 +22,7 @@
     playlists = [],
     activeTab = "setup",
     dlStatus = {};
-  let isUpdating = true,
+  let isUpdating = false,
     isDownloadingAll = false,
     showWelcome = true,
     showTutorial = false;
